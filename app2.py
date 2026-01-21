@@ -839,7 +839,7 @@ def main():
     with m5: st.markdown(metric_html("夏普比率", f"{metrics.get('Sharpe Ratio',0):.2f}", "", "#2c3e50"), unsafe_allow_html=True)
     with m6: st.markdown(metric_html("交易次数", f"{trade_count_real}", "", "#2c3e50"), unsafe_allow_html=True)
 
-    tab1, tab2, tab3 = st.tabs(["📈 综合图表", "📅 年度/月度回报 (新)", "📝 交易日记 (优化)"])
+    tab1, tab2, tab3 = st.tabs(["📈 综合图表", "📅 年度/月度回报", "📝 交易日记"])
     
     # ---------------- TAB 1: 综合图表 ----------------
     with tab1:
@@ -858,167 +858,154 @@ def main():
         # [Visual Update] Use 'plotly_white' template for a cleaner look
         fig.update_layout(template="plotly_white")
         
+        # 策略净值与基准
         fig.add_trace(go.Scatter(x=df_res.index, y=df_res['策略净值'], name="策略净值", line=dict(color='#c0392b', width=2.5)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df_res.index, y=bm_curve, name="基准", line=dict(color='#95a5a6', dash='dash', width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df_res.index, y=bm_curve, name="基准(等权)", line=dict(color='#95a5a6', dash='dash', width=1.5)), row=1, col=1)
         
-        # Add Asset Traces
+        # 叠加其他资产 (Normalization Key Step)
         colors = px.colors.qualitative.Plotly
         for i, asset in enumerate(overlay_assets):
-            s = sliced_data[asset]
-            # 归一化对比
-            if len(s) > 0:
-                s_norm = s / s.iloc[0] * df_res['策略净值'].iloc[0]
-                color = colors[i % len(colors)]
-                fig.add_trace(go.Scatter(x=s.index, y=s_norm, name=f"{asset}(对比)", line=dict(color=color, width=1, dash='dot'), opacity=0.7), row=1, col=1)
+            color = colors[i % len(colors)]
+            asset_series = sliced_data[asset]
+            # 关键修正：归一化处理，将资产起点对齐到策略起点，避免绝对价格差异导致图表不可读
+            normalized_asset = asset_series / asset_series.iloc[0] * df_res['策略净值'].iloc[0]
+            display_name = name_map.get(asset, asset)
+            fig.add_trace(
+                go.Scatter(
+                    x=df_res.index, 
+                    y=normalized_asset, 
+                    name=f"{display_name} (归一化)", 
+                    opacity=0.6, 
+                    line=dict(color=color, width=1)
+                ), 
+                row=1, col=1
+            )
 
-        # Drawdown Area [Visual Update] Better visualization of drawdown
-        eq = df_res['策略净值']
-        peak = eq.cummax()
-        dd = (eq - peak) / peak
-        # Use fill='tozeroy' with a semi-transparent red for drawdown
-        fig.add_trace(go.Scatter(x=df_res.index, y=dd, name="回撤", fill='tozeroy', line=dict(color='rgba(231, 76, 60, 0.6)', width=0.5)), row=2, col=1)
+        # 绘制背景色块表示持仓
+        # 为了性能，合并连续相同的持仓区间
+        if not df_res.empty:
+            df_res['hold_group'] = (df_res['持仓'] != df_res['持仓'].shift()).cumsum()
+            grouped_holds = df_res.groupby('hold_group').agg({'持仓': 'first', '总资产': 'count', '策略净值': lambda x: x.index[0], '策略净值': lambda x: (x.index[0], x.index[-1])})
+            
+            # 使用 vrect 绘制背景
+            rect_shapes = []
+            for _, row_g in df_res.groupby('hold_group'):
+                h_name = row_g['持仓'].iloc[0]
+                start_t = row_g.index[0]
+                end_t = row_g.index[-1]
+                
+                # 稍微扩展结束时间以填满缝隙
+                end_t_show = end_t + timedelta(days=1)
+                
+                bg_color = get_color_from_name(name_map.get(h_name, h_name))
+                
+                rect_shapes.append(dict(
+                    type="rect",
+                    xref="x", yref="paper",
+                    x0=start_t, x1=end_t_show,
+                    y0=0, y1=1,
+                    fillcolor=bg_color,
+                    opacity=0.3,
+                    layer="below",
+                    line_width=0,
+                ))
+            
+            fig.layout.shapes = rect_shapes
 
-        # [Visual Update] Add Range Slider
-        fig.update_xaxes(rangeslider_visible=True, row=2, col=1)
-        
+        # 回撤曲线 (Drawdown Area)
+        dd_series = (df_res['策略净值'] / df_res['策略净值'].cummax() - 1)
+        fig.add_trace(go.Scatter(
+            x=dd_series.index, y=dd_series, 
+            name="回撤幅度", 
+            fill='tozeroy', 
+            fillcolor='rgba(231, 76, 60, 0.3)', 
+            line=dict(color='#e74c3c', width=1)
+        ), row=2, col=1)
+
         fig.update_layout(
-            height=650, 
-            margin=dict(l=10, r=10, t=30, b=10),
+            height=600, 
             hovermode="x unified",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            xaxis_rangeslider_visible=False,
+            title_text="策略净值走势与持仓分布 (Holdings Overlay)",
+            margin=dict(l=20, r=20, t=40, b=20)
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    # ---------------- TAB 2: 年度/月度回报 (UI升级) ----------------
+    # ---------------- TAB 2: 月度/年度回报表 ----------------
     with tab2:
-        st.markdown("### 🗓️ 季节性效应分析 (Seasonal Heatmap)")
+        st.subheader("📅 历史回报热力表")
         
-        # 计算月度收益
-        monthly_ret = df_res['策略净值'].resample('M').last().pct_change()
-        monthly_ret_df = pd.DataFrame(monthly_ret)
-        monthly_ret_df['Year'] = monthly_ret_df.index.year
-        monthly_ret_df['Month'] = monthly_ret_df.index.month
+        # 计算年度回报
+        nav = df_res['策略净值']
+        # 按年重采样取最后一天数据，计算百分比变化
+        yearly_ret = nav.resample('Y').last().pct_change()
+        # 第一年的收益率计算需要特殊处理：第一年的期末值 / 整个回测期初值 - 1
+        if len(yearly_ret) > 0:
+            first_year = yearly_ret.index[0].year
+            first_year_end_val = nav.resample('Y').last().iloc[0]
+            start_val = nav.iloc[0]
+            yearly_ret.iloc[0] = first_year_end_val / start_val - 1
         
-        # 透视表
-        pivot_ret = monthly_ret_df.pivot(index='Year', columns='Month', values='策略净值')
+        # 计算月度回报表
+        monthly_ret = nav.resample('M').last().pct_change()
+        if len(monthly_ret) > 0:
+            # 修正第一个月的收益率
+            first_month = monthly_ret.index[0]
+            first_m_end = nav.resample('M').last().iloc[0]
+            monthly_ret.iloc[0] = first_m_end / start_val - 1
+
+        # 构建透视表：行=年，列=月
+        m_ret_df = pd.DataFrame({'ret': monthly_ret.values, 'year': monthly_ret.index.year, 'month': monthly_ret.index.month})
+        pivot_table = m_ret_df.pivot(index='year', columns='month', values='ret')
         
-        # 1. 热力图 (Plotly Heatmap)
-        fig_heat = go.Figure(data=go.Heatmap(
-            z=pivot_ret.values,
-            x=[f"{i}月" for i in range(1, 13)],
-            y=pivot_ret.index,
-            # [Visual Update] Chinese standard: Red for Up, Green for Down
-            # Use a custom divergence colorscale centered at 0
-            colorscale=[
-                [0.0, "rgba(0, 128, 0, 0.8)"],   # Dark Green (Negative)
-                [0.45, "rgba(200, 255, 200, 0.4)"], # Light Green
-                [0.5, "rgba(255, 255, 255, 1.0)"],  # White (Zero)
-                [0.55, "rgba(255, 200, 200, 0.4)"], # Light Red
-                [1.0, "rgba(255, 0, 0, 0.8)"]    # Red (Positive)
-            ],
-            zmid=0.0, # Center color scale at 0% return
-            texttemplate="%{z:.1%}",
-            textfont={"size": 11}
-        ))
-        fig_heat.update_layout(
-            title="月度回报热力图 (红涨绿跌)",
-            height=400,
-            xaxis_nticks=12,
-            template="plotly_white"
-        )
-        st.plotly_chart(fig_heat, use_container_width=True)
+        # 添加年度合计列
+        pivot_table['Yearly'] = yearly_ret.values
         
-        # 2. 年度统计表
-        st.markdown("### 📊 年度详细表现 (Yearly Performance)")
-        yearly_stats = []
-        for year in df_res.index.year.unique():
-            y_data = df_res[df_res.index.year == year]['策略净值']
-            if len(y_data) > 0:
-                start_val = y_data.iloc[0]
-                y_ret = (y_data.iloc[-1] / y_data.iloc[0]) - 1
-                
-                # Max DD in year
-                y_peak = y_data.cummax()
-                y_dd = (y_data - y_peak) / y_peak
-                y_max_dd = y_dd.min()
-                
-                # Sharpe (Daily)
-                y_daily_ret = y_data.pct_change().fillna(0)
-                y_vol = y_daily_ret.std() * np.sqrt(252)
-                y_sharpe = (y_ret - 0.03) / (y_vol + 1e-9) if y_vol > 0 else 0
-                
-                yearly_stats.append({
-                    "年份": year,
-                    "年度收益": y_ret,
-                    "最大回撤": y_max_dd,
-                    "夏普比率": y_sharpe,
-                    "波动率": y_vol
-                })
-        
-        df_yearly = pd.DataFrame(yearly_stats).set_index("年份").sort_index(ascending=False)
-        
-        # 使用 Streamlit Column Config 美化表格
+        # 格式化显示
         st.dataframe(
-            df_yearly,
-            column_config={
-                "年度收益": st.column_config.ProgressColumn(
-                    "年度收益", format="%.1f%%", min_value=-0.3, max_value=0.5
-                ),
-                "最大回撤": st.column_config.NumberColumn(
-                    "最大回撤", format="%.1f%%"
-                ),
-                "夏普比率": st.column_config.NumberColumn(
-                    "夏普比率", format="%.2f"
-                ),
-                "波动率": st.column_config.NumberColumn(
-                    "波动率", format="%.1f%%"
-                ),
-            },
-            use_container_width=True
+            pivot_table.style.format("{:+.2%}")
+            .background_gradient(cmap='RdYlGn', vmin=-0.1, vmax=0.1, axis=None)
+            .highlight_null(color='grey'),
+            use_container_width=True,
+            height=400
         )
-
-    # ---------------- TAB 3: 交易日记 (排序优化) ----------------
-    with tab3:
-        st.markdown("### 📝 策略操作日志")
         
-        df_log = pd.DataFrame(daily_details)
-        if not df_log.empty:
-            # 1. [Logic Update] 倒序排列：最近的日期在最上面
-            df_log = df_log.sort_values(by="日期", ascending=False)
-            
-            # 2. 筛选功能
-            show_only_trades = st.checkbox("🔍 只看调仓记录 (Hide Daily Holds)", value=True)
-            if show_only_trades:
-                # 筛选 "操作" 列不为空的行
-                df_view = df_log[df_log['操作'] != ""].copy()
-            else:
-                df_view = df_log.copy()
-            
-            # 格式化数字列
-            format_dict = {
-                "段内收益": "{:.2%}",
-                "总资产": "¥{:,.0f}"
-            }
-            # 动态添加资产列的格式化
-            for col in df_view.columns:
-                if col not in ["日期", "当前持仓", "持仓天数", "段内收益", "操作", "总资产"]:
-                    format_dict[col] = "{:.4f}"
+        st.caption("*Yearly 列为该年全年的复利回报。")
 
-            # 4. 显示
-            st.dataframe(
-                df_view,
-                column_config={
-                    "日期": st.column_config.DateColumn("日期", format="YYYY-MM-DD"),
-                    "操作": st.column_config.TextColumn("交易指令", width="medium"),
-                    "段内收益": st.column_config.NumberColumn("持仓收益", format="%.2f%%"),
-                    "当前持仓": st.column_config.TextColumn("持仓标的"),
-                },
-                use_container_width=True,
-                height=500,
-                hide_index=True # [Visual Update] Hide index for cleaner look
-            )
-        else:
-            st.info("暂无交易记录")
+    # ---------------- TAB 3: 交易日记 ----------------
+    with tab3:
+        st.subheader("📝 详细交易记录")
+        
+        logs_df = pd.DataFrame(daily_details)
+        # 筛选出有操作的日子，或者是每个月的第一天（方便查看定投）
+        # 这里只展示有“操作”记录的行，或者资金发生重大变化的行
+        
+        # 增加一列：资金变动
+        logs_df['日收益'] = logs_df['总资产'].pct_change().fillna(0)
+        
+        # 筛选：有“操作”备注的，或者定投日（简单起见，通过日期判断不准，直接用备注空值判断）
+        # 实际上我们的代码在 '操作' 列记录了调仓。
+        # 如果是定投，代码里没有显式记录到 '操作' 字段，但我们可以通过现金变化推断，这里暂只显示调仓。
+        
+        trade_logs = logs_df[logs_df['操作'] != ""]
+        
+        st.markdown(f"**共发生 {len(trade_logs)} 次调仓操作**")
+        
+        # 格式化
+        format_dict = {"总资产": "{:,.2f}", "日收益": "{:+.2%}", "段内收益": "{:+.2%}"}
+        # 对资产列格式化
+        for col in logs_df.columns:
+            if col not in ["日期", "当前持仓", "操作", "持仓天数"] and col not in format_dict:
+                 format_dict[col] = "{:.3f}"
+
+        st.dataframe(
+            trade_logs.style.format(format_dict),
+            use_container_width=True,
+            height=500
+        )
+        
+        with st.expander("查看所有交易日详情 (Full Daily Logs)"):
+            st.dataframe(logs_df.style.format(format_dict), use_container_width=True)
 
 if __name__ == "__main__":
     main()
