@@ -457,8 +457,18 @@ def main():
             default_display = current_selection_codes
             
         valid_defaults = [x for x in default_display if x in options]
+        
+        st.caption("🔍 提示：点击下方框可打字搜索。如未找到，可在下方手动添加。")
         selected_display = st.multiselect("核心标的池", options, default=valid_defaults)
         selected_codes = [x.split(" | ")[0] for x in selected_display]
+        
+        # 增加手动输入功能
+        manual_codes_input = st.text_input("➕ 手动添加代码 (逗号分隔)", "", help="输入ETF代码，例如: 510050, 159919")
+        if manual_codes_input:
+             manual_list = [x.strip() for x in manual_codes_input.split(",") if x.strip()]
+             selected_codes.extend(manual_list)
+             # 去重
+             selected_codes = list(set(selected_codes))
         
         st.divider()
         st.subheader("2. 资金管理")
@@ -915,45 +925,21 @@ def main():
 
     tab1, tab2, tab3 = st.tabs(["📈 综合图表", "📅 年度/月度回报", "📝 交易日记"])
     with tab1:
-        # [New] Asset Overlay Selection
-        st.caption("📉 标的走势叠加 (Asset Overlays)")
-        all_assets = sliced_data.columns.tolist()
-        overlay_assets = st.multiselect(
-            "选择要对比的底层资产 (Select Assets to Compare)", 
-            options=all_assets,
-            default=[], 
-            help="选择标的后，其净值曲线将叠加显示在主图中，方便对比策略与单一资产的表现。"
-        )
-
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3], specs=[[{"secondary_y": False}], [{"secondary_y": False}]])
         fig.add_trace(go.Scatter(x=df_res.index, y=df_res['策略净值'], name="策略净值", line=dict(color='#c0392b', width=2)), row=1, col=1)
         fig.add_trace(go.Scatter(x=df_res.index, y=bm_curve, name="基准", line=dict(color='#95a5a6', dash='dash')), row=1, col=1)
         
-        # Add Asset Traces
-        colors = px.colors.qualitative.Plotly
-        for i, asset in enumerate(overlay_assets):
-            s = sliced_data[asset]
-            # Normalize to 1.0 at start (or first valid) then scale to strategy start? 
-            # Simple normalization: Start at 1.0 based on strategy start date
-            if not s.empty:
-                s_norm = s / s.iloc[0]
-                color = colors[i % len(colors)]
-                fig.add_trace(go.Scatter(x=s.index, y=s_norm, name=name_map.get(asset, asset), line=dict(color=color, width=1), opacity=0.7), row=1, col=1)
-
-        fig.add_trace(go.Area(x=df_res.index, y=df_res['持仓'], name="持仓", marker=dict(color='#3498db'), showlegend=False), row=2, col=1)
+        # 修正 go.Area 报错，改用阶梯状 Scatter
+        fig.add_trace(go.Scatter(
+            x=df_res.index, 
+            y=df_res['持仓'], 
+            name="持仓", 
+            mode='lines',
+            line=dict(width=2, color='#3498db'),
+            line_shape='hv', # 使用 'hv' (horizontal-vertical) 阶梯线来表示状态变化
+            showlegend=False
+        ), row=2, col=1)
         
-        # Color map for holdings
-        hold_codes = df_res['持仓'].unique()
-        for code in hold_codes:
-            mask = df_res['持仓'] == code
-            # Only fill where true
-            # This is tricky in plotly for categorical area. 
-            # Alternative: Scatter with fill='tozeroy' but complicated for switching.
-            # Simpler: Just use the text or a heatmap? 
-            # Current approach: Let's stick to simple Scatter for holdings but maybe use a heat-map style or scatter markers.
-            pass
-
-        # Re-implement Holdings as a colored strip or step chart
         fig.update_yaxes(title_text="净值", row=1, col=1)
         fig.update_yaxes(title_text="持仓代码", row=2, col=1)
         fig.update_layout(height=600, hovermode="x unified", template="plotly_white")
