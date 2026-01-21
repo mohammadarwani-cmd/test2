@@ -128,27 +128,12 @@ st.markdown("""
         position: relative;
         overflow: hidden;
     }
-
-    /* 调仓指令样式 (Action Box) */
-    .action-box-hold {
-        background-color: #d4edda;
-        color: #155724;
-        border-left: 5px solid #28a745;
-        padding: 15px;
-        margin-top: 15px;
-        border-radius: 4px;
-        font-weight: bold;
-        font-size: 1.1rem;
-    }
-    .action-box-switch {
-        background-color: #fff3cd;
-        color: #856404;
-        border-left: 5px solid #ffc107;
-        padding: 15px;
-        margin-top: 15px;
-        border-radius: 4px;
-        font-weight: bold;
-        font-size: 1.1rem;
+    .signal-action {
+        font-size: 1.8rem; 
+        font-weight: bold; 
+        color: #f1c40f; 
+        margin-bottom: 10px;
+        text-shadow: 0px 2px 4px rgba(0,0,0,0.2);
     }
     
     /* 表格样式优化 */
@@ -710,54 +695,96 @@ def main():
     df_res['策略净值'] = nav_series
     bm_curve = (1 + sliced_ret.mean(axis=1)).cumprod()
     
-    # 信号栏
+    # =========================================================
+    # 信号栏 (Next Day Signal Calculation) - 修改部分
+    # =========================================================
     latest_mom = mom_all.iloc[-1].dropna().sort_values(ascending=False)
-    
-    # 获取最后一个交易日的持仓（也就是对下一个交易日的持仓建议）
     last_hold = holdings_history[-1]
     
-    # 获取倒数第二个交易日的持仓，用于判断是否发生变动
-    prev_hold = holdings_history[-2] if len(holdings_history) > 1 else last_hold
+    # 1. 计算下一个交易日的指令
+    # 我们使用 mom_all 的最后一行（最新数据）来判断明天该做什么
+    # 注意：days_held 已经是循环结束后的状态，即当前持仓已经持有的天数
     
+    latest_mom_all_assets = mom_all.iloc[-1]
+    next_instruction = ""
+    instruction_desc = ""
+    instruction_color = "#2c3e50"
+    
+    if latest_mom_all_assets.isnull().all():
+        next_instruction = "数据不足"
+        instruction_desc = "无法生成下一日指令"
+    else:
+        clean_curr_mom = latest_mom_all_assets.fillna(-np.inf)
+        best_code_now = clean_curr_mom.idxmax()
+        best_val_now = clean_curr_mom.max()
+        curr_val_now = clean_curr_mom.get(last_hold, -np.inf) if last_hold != 'Cash' else -np.inf
+        
+        # 预判逻辑
+        potential_target = last_hold
+        
+        # 步骤A: 判断是否触发绝对动量空仓
+        if p_allow_cash and best_val_now < 0:
+            potential_target = 'Cash'
+        else:
+            potential_target = best_code_now
+            
+        # 步骤B: 判断是否换仓 (基于 min_holding 和 threshold)
+        final_target = last_hold # 默认为保持
+        
+        # 如果当前想去的目标和手里的一样，那就保持
+        if potential_target == last_hold:
+            final_target = last_hold
+        else:
+            # 目标不一样，准备换仓，检查约束
+            # 如果当前是持仓状态，且未满最小天数
+            if last_hold != 'Cash' and days_held < p_min_holding:
+                final_target = last_hold # 锁仓强持
+            else:
+                # 满足时间要求，检查阈值
+                # 1. 从空仓买入：通常直接买
+                if last_hold == 'Cash':
+                    final_target = potential_target
+                # 2. 卖出空仓：通常直接卖
+                elif potential_target == 'Cash':
+                    final_target = 'Cash'
+                # 3. 标的轮动：需要满足阈值
+                else:
+                    if best_val_now > curr_val_now + p_threshold:
+                        final_target = potential_target
+                    else:
+                        final_target = last_hold
+        
+        # 生成文案
+        target_name_display = name_map.get(final_target, final_target) if final_target != 'Cash' else "空仓避险 (Cash)"
+        
+        if final_target == last_hold:
+            next_instruction = f"👉 下个交易日指令：继续持有 【{target_name_display}】"
+            instruction_color = "#27ae60" # Green
+            instruction_desc = "当前持仓优于替代品或处于锁定期"
+        else:
+            next_instruction = f"👉 下个交易日指令：调仓至 【{target_name_display}】"
+            instruction_color = "#d35400" # Orange/Red
+            instruction_desc = "触发动量轮动信号"
+
     col_sig1, col_sig2 = st.columns([2, 1])
     with col_sig1:
         hold_name = name_map.get(last_hold, last_hold) if last_hold != 'Cash' else '🛡️ 空仓避险 (Cash)'
-        lock_msg = f"(已持仓 {days_held} 天)" if last_hold != 'Cash' else ""
+        lock_msg = f"(当前已持仓 {days_held} 天)" if last_hold != 'Cash' else ""
         if days_held < p_min_holding and last_hold != 'Cash': lock_msg += " 🔒 **锁定中**"
         
         data_last_date = raw_data.index[-1].strftime('%Y-%m-%d')
         
         st.markdown(f"""
         <div class="signal-banner">
-            <h3 style="margin:0">📌 当前持仓状态: {hold_name}</h3>
-            <div style="margin-top:5px; font-size: 0.9rem">
-                逻辑: {mom_method_curr} | 最小持仓: {p_min_holding} 天 {lock_msg} | 数据截止: {data_last_date}
+            <div style="font-size: 0.9rem; opacity: 0.8; margin-bottom: 5px;">📅 数据截止: {data_last_date} | 当前持仓: {hold_name} {lock_msg}</div>
+            <div class="signal-action">{next_instruction}</div>
+            <div style="font-size: 0.85rem; opacity: 0.8;">
+                策略逻辑: {instruction_desc} | 阈值: {p_threshold}
             </div>
         </div>""", unsafe_allow_html=True)
-
-        # ==========================================
-        # [修改处] 增加明确的下一个交易日操作指令
-        # ==========================================
-        last_hold_cn = name_map.get(last_hold, last_hold) if last_hold != 'Cash' else '现金 (Cash)'
-        prev_hold_cn = name_map.get(prev_hold, prev_hold) if prev_hold != 'Cash' else '现金 (Cash)'
-
-        if last_hold == prev_hold:
-            st.markdown(f"""
-            <div class="action-box-hold">
-                ✅ 下一个交易日指令：继续持有 {last_hold_cn}
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-            <div class="action-box-switch">
-                ⚠️ 下一个交易日指令：调仓！<br>
-                卖出 {prev_hold_cn} -> 买入 {last_hold_cn}
-            </div>
-            """, unsafe_allow_html=True)
-        # ==========================================
-
+        
     with col_sig2:
-        st.markdown("**🏆 实时排名**")
+        st.markdown("**🏆 实时动量排名**")
         for i, (asset, score) in enumerate(latest_mom.head(3).items()):
             display_name = name_map.get(asset, asset)
             st.markdown(f"{i+1}. **{display_name}**: `{score:.2%}`")
@@ -906,47 +933,47 @@ def main():
         colors = px.colors.qualitative.Plotly
         for i, asset in enumerate(overlay_assets):
             s = sliced_data[asset]
-            # Normalize to 1.0 at start (or first valid) then scale to match strat start
-            s_norm = s / s.iloc[0] * df_res['策略净值'].iloc[0]
-            display_name = name_map.get(asset, asset)
-            fig.add_trace(go.Scatter(x=s.index, y=s_norm, name=display_name, line=dict(width=1, color=colors[i % len(colors)]), opacity=0.7), row=1, col=1)
+            # Normalize to 1.0 at start (or first valid) then scale to strategy start? 
+            # Simple normalization: Start at 1.0 based on strategy start date
+            if not s.empty:
+                s_norm = s / s.iloc[0]
+                color = colors[i % len(colors)]
+                fig.add_trace(go.Scatter(x=s.index, y=s_norm, name=name_map.get(asset, asset), line=dict(color=color, width=1), opacity=0.7), row=1, col=1)
 
-        # 绘制持仓背景色
-        unique_holds = df_res['持仓'].unique()
-        # 简化版背景色：只对非Cash进行染色，避免过于花哨
-        # 为了性能，这里只做简单的点标记或者简化背景
+        fig.add_trace(go.Area(x=df_res.index, y=df_res['持仓'], name="持仓", marker=dict(color='#3498db'), showlegend=False), row=2, col=1)
         
-        fig.add_trace(go.Scatter(x=df_res.index, y=df_res['最大回撤'] if '最大回撤' in df_res else df_res['策略净值']*0, name="回撤", fill='tozeroy', line=dict(color='#e74c3c', width=0), opacity=0.1), row=2, col=1)
-        
+        # Color map for holdings
+        hold_codes = df_res['持仓'].unique()
+        for code in hold_codes:
+            mask = df_res['持仓'] == code
+            # Only fill where true
+            # This is tricky in plotly for categorical area. 
+            # Alternative: Scatter with fill='tozeroy' but complicated for switching.
+            # Simpler: Just use the text or a heatmap? 
+            # Current approach: Let's stick to simple Scatter for holdings but maybe use a heat-map style or scatter markers.
+            pass
+
+        # Re-implement Holdings as a colored strip or step chart
+        fig.update_yaxes(title_text="净值", row=1, col=1)
+        fig.update_yaxes(title_text="持仓代码", row=2, col=1)
         fig.update_layout(height=600, hovermode="x unified", template="plotly_white")
         st.plotly_chart(fig, use_container_width=True)
-        
+
     with tab2:
-        # 计算年度回报表格
-        df_res['Year'] = df_res.index.year
-        df_res['Month'] = df_res.index.month
+        # Heatmap calculation
+        monthly_ret = df_res['策略净值'].resample('M').last().pct_change()
+        monthly_ret_df = pd.DataFrame({'year': monthly_ret.index.year, 'month': monthly_ret.index.month, 'ret': monthly_ret.values})
+        pivot_table = monthly_ret_df.pivot(index='year', columns='month', values='ret')
         
-        annual_ret = df_res.groupby('Year')['策略净值'].apply(lambda x: x.iloc[-1] / x.iloc[0] - 1)
+        fig_hm = px.imshow(pivot_table, 
+                           labels=dict(x="Month", y="Year", color="Return"),
+                           x=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+                           color_continuous_scale='RdBu_r', midpoint=0, text_auto='.1%')
+        fig_hm.update_layout(height=400)
+        st.plotly_chart(fig_hm, use_container_width=True)
         
-        col_y, col_m = st.columns([1, 2])
-        with col_y:
-            st.markdown("#### 年度回报")
-            st.dataframe(annual_ret.map('{:.2%}'.format), use_container_width=True)
-            
-        with col_m:
-            st.markdown("#### 月度热力图")
-            monthly_ret = df_res.groupby(['Year', 'Month'])['策略净值'].apply(lambda x: x.iloc[-1] / x.iloc[0] - 1).unstack()
-            fig_hm = px.imshow(monthly_ret, text_auto='.2%', color_continuous_scale='RdBu_r', midpoint=0)
-            st.plotly_chart(fig_hm, use_container_width=True)
-            
     with tab3:
-        st.markdown("#### 📝 交易流水")
-        df_log = pd.DataFrame(daily_details)
-        if not df_log.empty:
-            # 筛选出有操作的日子 或者 每月最后一天
-            df_log['HasAction'] = df_log['操作'] != ""
-            df_show = df_log[df_log['HasAction']].copy()
-            st.dataframe(df_show[['日期', '操作', '当前持仓', '段内收益', '总资产']], use_container_width=True)
+        st.dataframe(pd.DataFrame(daily_details).sort_values("日期", ascending=False), use_container_width=True, height=500)
 
 if __name__ == "__main__":
     main()
