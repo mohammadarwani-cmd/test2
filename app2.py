@@ -23,8 +23,51 @@ except ImportError:
 # ==========================================
 CONFIG_FILE = 'strategy_config.json'
 
+# ==========================================
+# 预设标的池配置
+# ==========================================
+
 # 默认标的池
 DEFAULT_CODES = ["518880", "588000", "513100", "510180"]
+
+# 预设ETF池 - 按策略分类
+PRESET_POOLS = {
+    "🎯 核心轮动 (默认)": {
+        "codes": ["518880", "588000", "513100", "510180"],
+        "desc": "黄金+科创+纳指+上证180"
+    },
+    "🇨🇳 A股宽基": {
+        "codes": ["510300", "510500", "588000", "159915", "510180", "512890"],
+        "desc": "沪深300+中证500+科创50+创业板+上证180+红利低波"
+    },
+    "🌍 全球配置": {
+        "codes": ["513100", "513500", "510300", "518880"],
+        "desc": "纳指100+标普500+沪深300+黄金"
+    },
+    "📊 行业轮动": {
+        "codes": ["512480", "512880", "512890", "515700", "512690", "512170"],
+        "desc": "半导体+证券+红利+新能源+消费+医药"
+    },
+    "🛡️ 防御稳健": {
+        "codes": ["518880", "511880", "512890", "510300"],
+        "desc": "黄金+货币+红利低波+沪深300"
+    },
+    "🚀 高成长": {
+        "codes": ["588000", "159915", "513100", "512480"],
+        "desc": "科创50+创业板+纳指100+半导体"
+    }
+}
+
+# ETF分类映射
+ETF_CATEGORIES = {
+    "510300": "宽基", "510500": "宽基", "588000": "宽基", "159915": "宽基",
+    "510180": "宽基", "512890": "宽基", "510050": "宽基", "159949": "宽基",
+    "513100": "海外", "513500": "海外", "513030": "海外", "159941": "海外",
+    "518880": "商品", "518800": "商品", "159934": "商品", "159812": "商品",
+    "512480": "行业", "512880": "行业", "515700": "行业", "512690": "行业",
+    "512170": "行业", "512000": "行业", "512800": "行业", "515050": "行业",
+    "511880": "货币", "511990": "货币", "511660": "货币"
+}
 
 DEFAULT_PARAMS = {
     'lookback': 25,
@@ -553,27 +596,131 @@ def main():
         
         # --- 1. 资产与数据 ---
         st.subheader("1. 资产池配置")
-        all_etfs = get_all_etf_list()
-        options = all_etfs['display'].tolist() if not all_etfs.empty else DEFAULT_CODES
-        current_selection_codes = st.session_state.params.get('selected_codes', DEFAULT_CODES)
         
-        default_display = []
-        if not all_etfs.empty:
-            for code in current_selection_codes:
-                match = all_etfs[all_etfs['代码'] == code]
-                if not match.empty:
-                    default_display.append(match.iloc[0]['display'])
-                else:
-                    for opt in options:
-                        if opt.startswith(code):
-                            default_display.append(opt)
-                            break
-        else:
-            default_display = current_selection_codes
+        all_etfs = get_all_etf_list()
+        
+        # 初始化session state中的标的列表
+        if 'selected_codes' not in st.session_state:
+            st.session_state.selected_codes = st.session_state.params.get('selected_codes', DEFAULT_CODES)
+        
+        # ===== 预设池快速选择 =====
+        with st.expander("📦 快速选择预设池", expanded=False):
+            preset_names = list(PRESET_POOLS.keys())
+            selected_preset = st.selectbox("选择预设组合", ["-- 请选择 --"] + preset_names)
             
-        valid_defaults = [x for x in default_display if x in options]
-        selected_display = st.multiselect("核心标的池", options, default=valid_defaults)
-        selected_codes = [x.split(" | ")[0] for x in selected_display]
+            if selected_preset != "-- 请选择 --":
+                preset_info = PRESET_POOLS[selected_preset]
+                st.caption(f"**组合说明:** {preset_info['desc']}")
+                if st.button(f"✅ 应用 [{selected_preset}]", key="apply_preset"):
+                    st.session_state.selected_codes = preset_info['codes'].copy()
+                    st.toast(f"已应用预设池: {selected_preset}", icon="✅")
+                    st.rerun()
+        
+        # ===== 已选标的展示 =====
+        st.markdown("**📋 当前标的池**")
+        
+        # 已选标的数量和清空按钮
+        col_count, col_clear = st.columns([3, 1])
+        with col_count:
+            st.markdown(f"**已选 {len(st.session_state.selected_codes)} 个标的**")
+        with col_clear:
+            if st.session_state.selected_codes and st.button("🗑️ 清空", key="clear_all"):
+                st.session_state.selected_codes = []
+                st.rerun()
+        
+        if st.session_state.selected_codes:
+            # 显示已选标的列表
+            for i, code in enumerate(st.session_state.selected_codes):
+                cols = st.columns([3, 1])
+                with cols[0]:
+                    # 获取标的名称
+                    name = PRESET_ETFS.get(code, code)
+                    if not all_etfs.empty:
+                        match = all_etfs[all_etfs['代码'] == code]
+                        if not match.empty:
+                            name = match.iloc[0]['名称']
+                    # 获取分类
+                    category = ETF_CATEGORIES.get(code, "其他")
+                    st.markdown(f"`{code}` {name} *({category})*")
+                with cols[1]:
+                    if st.button("❌", key=f"del_{code}_{i}", help=f"删除 {code}"):
+                        st.session_state.selected_codes.remove(code)
+                        st.rerun()
+        else:
+            st.warning("⚠️ 当前没有选择任何标的")
+        
+        st.divider()
+        
+        # ===== 添加标的 =====
+        with st.expander("➕ 添加标的到池", expanded=False):
+            add_tab1, add_tab2 = st.tabs(["🔍 从列表选择", "⌨️ 手动输入"])
+            
+            with add_tab1:
+                # 按分类筛选
+                if not all_etfs.empty:
+                    # 构建带分类的选项
+                    etf_options = []
+                    for _, row in all_etfs.iterrows():
+                        code = row['代码']
+                        name = row['名称']
+                        category = ETF_CATEGORIES.get(code, "其他")
+                        etf_options.append({
+                            'display': f"{code} | {name} ({category})",
+                            'code': code,
+                            'category': category
+                        })
+                    
+                    # 分类筛选
+                    categories = sorted(list(set([e['category'] for e in etf_options])))
+                    selected_category = st.selectbox("按分类筛选", ["全部"] + categories)
+                    
+                    # 过滤选项
+                    if selected_category != "全部":
+                        filtered_options = [e for e in etf_options if e['category'] == selected_category]
+                    else:
+                        filtered_options = etf_options
+                    
+                    # 排除已选的
+                    available_options = [e for e in filtered_options if e['code'] not in st.session_state.selected_codes]
+                    
+                    if available_options:
+                        option_display = [e['display'] for e in available_options]
+                        selected_to_add = st.multiselect("选择要添加的标的", option_display)
+                        
+                        if selected_to_add and st.button("➕ 添加选中标的", key="add_from_list"):
+                            for display in selected_to_add:
+                                code = display.split(" | ")[0]
+                                if code not in st.session_state.selected_codes:
+                                    st.session_state.selected_codes.append(code)
+                            st.rerun()
+                    else:
+                        st.info("该分类下没有可选标的")
+                else:
+                    st.warning("无法获取ETF列表")
+            
+            with add_tab2:
+                # 手动输入ETF代码
+                custom_code = st.text_input("输入ETF代码 (如: 510300)", placeholder="6位数字代码")
+                if custom_code:
+                    custom_code = custom_code.strip()
+                    # 验证代码格式
+                    if len(custom_code) == 6 and custom_code.isdigit():
+                        if custom_code not in st.session_state.selected_codes:
+                            if st.button("➕ 添加此标的", key="add_custom"):
+                                st.session_state.selected_codes.append(custom_code)
+                                st.rerun()
+                        else:
+                            st.warning("该标的已在池中")
+                    else:
+                        st.error("请输入6位数字ETF代码")
+        
+        # 更新selected_codes用于后续计算
+        selected_codes = st.session_state.selected_codes
+        
+        # 保存到配置
+        if selected_codes != st.session_state.params.get('selected_codes', []):
+            st.session_state.params['selected_codes'] = selected_codes.copy()
+            save_config(st.session_state.params)
         
         st.divider()
         st.subheader("2. 资金管理")
@@ -640,8 +787,12 @@ def main():
                 st.session_state.params = current_params
                 save_config(current_params)
         
+        st.divider()
+        
+        # 重置配置
         if st.button("🔄 重置默认配置"):
             st.session_state.params = DEFAULT_PARAMS.copy()
+            st.session_state.selected_codes = DEFAULT_CODES.copy()
             save_config(DEFAULT_PARAMS)
             st.rerun()
 
