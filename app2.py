@@ -129,6 +129,42 @@ st.markdown("""
         overflow: hidden;
     }
     
+    /* 建议横幅 - 继续持有 */
+    .advice-banner-hold {
+        padding: 25px;
+        border-radius: 12px;
+        margin-bottom: 25px;
+        color: white;
+        background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%);
+        box-shadow: 0 4px 15px rgba(39, 174, 96, 0.3);
+        position: relative;
+        overflow: hidden;
+    }
+    
+    /* 建议横幅 - 调仓 */
+    .advice-banner-switch {
+        padding: 25px;
+        border-radius: 12px;
+        margin-bottom: 25px;
+        color: white;
+        background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);
+        box-shadow: 0 4px 15px rgba(231, 76, 60, 0.3);
+        position: relative;
+        overflow: hidden;
+    }
+    
+    /* 建议横幅 - 空仓 */
+    .advice-banner-cash {
+        padding: 25px;
+        border-radius: 12px;
+        margin-bottom: 25px;
+        color: white;
+        background: linear-gradient(135deg, #7f8c8d 0%, #95a5a6 100%);
+        box-shadow: 0 4px 15px rgba(127, 140, 141, 0.3);
+        position: relative;
+        overflow: hidden;
+    }
+    
     /* 表格样式优化 */
     .dataframe {
         font-size: 13px !important;
@@ -215,9 +251,11 @@ def get_all_etf_list():
 def download_market_data(codes_list, end_date_str):
     """
     纯净历史数据下载，不进行实时融合
+    返回：收盘价数据、开盘价数据、名称映射
     """
     start_str = '20150101' 
-    price_dict = {}
+    close_dict = {}
+    open_dict = {}
     name_map = {}
     
     etf_list = get_all_etf_list()
@@ -237,17 +275,20 @@ def download_market_data(codes_list, end_date_str):
             if not df.empty:
                 df['日期'] = pd.to_datetime(df['日期'])
                 df.set_index('日期', inplace=True)
-                price_dict[name] = df['收盘'].astype(float)
+                close_dict[name] = df['收盘'].astype(float)
+                open_dict[name] = df['开盘'].astype(float)
         except Exception:
             continue
 
-    if not price_dict:
-        return None, None
+    if not close_dict:
+        return None, None, None
 
-    data = pd.concat(price_dict, axis=1).sort_index().ffill()
-    data.dropna(how='all', inplace=True)
-    if len(data) < 20: return None, None
-    return data, name_map
+    close_data = pd.concat(close_dict, axis=1).sort_index().ffill()
+    open_data = pd.concat(open_dict, axis=1).sort_index().ffill()
+    close_data.dropna(how='all', inplace=True)
+    open_data.dropna(how='all', inplace=True)
+    if len(close_data) < 20: return None, None, None
+    return close_data, open_data, name_map
 
 # ==========================================
 # 3. 策略内核 (Strategy Core)
@@ -328,6 +369,87 @@ def fast_backtest_vectorized(daily_ret, mom_df, threshold, min_holding=1, cost_r
     drawdown = (equity_curve - cummax) / cummax
     max_dd = drawdown.min()
     return total_ret, max_dd, equity_curve, trade_count
+
+# ==========================================
+# 3.5 下一个交易日建议功能 (新增)
+# ==========================================
+
+def generate_next_day_advice(close_data, open_data, last_hold, mom_method, lookback, smooth, threshold, allow_cash, name_map):
+    """
+    生成下一个交易日的投资建议
+    
+    参数:
+        close_data: 收盘价数据
+        open_data: 开盘价数据
+        last_hold: 当前持仓标的
+        mom_method: 动量计算方法
+        lookback: 动量周期
+        smooth: 平滑窗口
+        threshold: 换仓阈值
+        allow_cash: 是否允许空仓
+        name_map: 代码到名称的映射
+    
+    返回:
+        advice_type: 'hold', 'switch', 'cash'
+        advice_text: 建议文本
+        target_asset: 目标标的
+        current_asset: 当前持仓标的
+        mom_ranking: 动量排名
+    """
+    # 计算最新动量
+    mom = calculate_momentum(close_data, lookback, smooth, mom_method)
+    
+    # 获取最新动量值
+    latest_mom = mom.iloc[-1].dropna()
+    latest_mom_sorted = latest_mom.sort_values(ascending=False)
+    
+    # 获取最佳标的
+    best_asset = latest_mom_sorted.index[0]
+    best_score = latest_mom_sorted.iloc[0]
+    
+    # 确定当前持仓的动量值
+    current_score = latest_mom.get(last_hold, -np.inf) if last_hold and last_hold != 'Cash' else -np.inf
+    
+    # 判断是否调仓（不考虑最小持仓天数）
+    target = last_hold
+    
+    if allow_cash and best_score < 0:
+        # 所有标的动量为负，建议空仓
+        target = 'Cash'
+    else:
+        if last_hold is None or last_hold == 'Cash':
+            # 当前空仓，建议买入最佳标的
+            target = best_asset
+        else:
+            # 当前有持仓，判断是否调仓
+            if best_asset != last_hold:
+                if best_score > current_score + threshold:
+                    target = best_asset
+    
+    # 生成建议文本
+    if target == last_hold:
+        if target == 'Cash':
+            advice_type = 'cash'
+            advice_text = "下一个交易日：继续空仓避险"
+        else:
+            advice_type = 'hold'
+            target_name = name_map.get(target, target)
+            advice_text = f"下一个交易日：继续持有 {target_name}"
+    else:
+        advice_type = 'switch'
+        current_name = name_map.get(last_hold, last_hold) if last_hold and last_hold != 'Cash' else "空仓"
+        target_name = name_map.get(target, target) if target != 'Cash' else "空仓避险"
+        advice_text = f"下一个交易日：调仓至 {target_name}"
+    
+    return {
+        'advice_type': advice_type,
+        'advice_text': advice_text,
+        'target_asset': target,
+        'current_asset': last_hold,
+        'mom_ranking': latest_mom_sorted,
+        'best_score': best_score,
+        'current_score': current_score
+    }
 
 # ==========================================
 # 4. 分析师工具箱
@@ -536,8 +658,8 @@ def main():
         st.stop()
         
     with st.spinner("正在加载历史行情数据 (Historical Data Only)..."):
-        # [修改] 使用简单的历史下载函数
-        raw_data, name_map = download_market_data(selected_codes, end_date.strftime('%Y%m%d'))
+        # [修改] 同时获取收盘价和开盘价数据
+        raw_data, open_data, name_map = download_market_data(selected_codes, end_date.strftime('%Y%m%d'))
         
     if raw_data is None:
         st.error("数据不足或下载失败。")
@@ -559,7 +681,7 @@ def main():
     signal_mom = sliced_mom.shift(1)
     dates = sliced_ret.index
     
-    # === 回测逻辑 ===
+    # === 回测逻辑（保持不变）===
     cash = initial_capital
     share_val = 0.0
     curr_hold = None
@@ -688,30 +810,49 @@ def main():
     df_res['策略净值'] = nav_series
     bm_curve = (1 + sliced_ret.mean(axis=1)).cumprod()
     
-    # 信号栏
-    latest_mom = mom_all.iloc[-1].dropna().sort_values(ascending=False)
+    # === 生成下一个交易日建议（新增功能）===
     last_hold = holdings_history[-1]
+    next_day_advice = generate_next_day_advice(
+        raw_data, open_data, last_hold, 
+        mom_method_curr, p_lookback, p_smooth, p_threshold, p_allow_cash, name_map
+    )
     
+    # 信号栏 - 显示下一个交易日建议
     col_sig1, col_sig2 = st.columns([2, 1])
     with col_sig1:
-        hold_name = name_map.get(last_hold, last_hold) if last_hold != 'Cash' else '🛡️ 空仓避险 (Cash)'
-        lock_msg = f"(已持仓 {days_held} 天)" if last_hold != 'Cash' else ""
-        if days_held < p_min_holding and last_hold != 'Cash': lock_msg += " 🔒 **锁定中**"
+        # 根据建议类型选择样式
+        advice_type = next_day_advice['advice_type']
+        advice_text = next_day_advice['advice_text']
+        banner_class = {
+            'hold': 'advice-banner-hold',
+            'switch': 'advice-banner-switch',
+            'cash': 'advice-banner-cash'
+        }.get(advice_type, 'signal-banner')
         
-        # [修改] 简化显示，移除实时数据标签
+        # 构建附加信息
+        target_asset = next_day_advice['target_asset']
+        current_asset = next_day_advice['current_asset']
+        best_score = next_day_advice['best_score']
+        current_score = next_day_advice['current_score']
+        
+        extra_info = f"最佳标的动量: {best_score:.2%}"
+        if current_asset and current_asset != 'Cash':
+            extra_info += f" | 当前持仓动量: {current_score:.2%}"
+        
         data_last_date = raw_data.index[-1].strftime('%Y-%m-%d')
         
         st.markdown(f"""
-        <div class="signal-banner">
-            <h3 style="margin:0">📌 当前持仓: {hold_name}</h3>
+        <div class="{banner_class}">
+            <h3 style="margin:0">📌 {advice_text}</h3>
             <div style="margin-top:5px; font-size: 0.9rem">
-                逻辑: {mom_method_curr} | 最小持仓: {p_min_holding} 天 {lock_msg} | 数据截止: {data_last_date}
+                逻辑: {mom_method_curr} | 阈值: {p_threshold:.3f} | {extra_info} | 数据截止: {data_last_date}
             </div>
         </div>""", unsafe_allow_html=True)
         
     with col_sig2:
-        st.markdown("**🏆 实时排名**")
-        for i, (asset, score) in enumerate(latest_mom.head(3).items()):
+        st.markdown("**🏆 动量排名**")
+        mom_ranking = next_day_advice['mom_ranking']
+        for i, (asset, score) in enumerate(mom_ranking.head(3).items()):
             display_name = name_map.get(asset, asset)
             st.markdown(f"{i+1}. **{display_name}**: `{score:.2%}`")
 
